@@ -17,10 +17,14 @@ env/
 .mypy_cache/
 .ruff_cache/
 
-# IDE
+# IDE / 세션 도구
 .vscode/
 .idea/
 *.swp
+.claude/
+
+# 중첩 작업 디렉터리 (embedded git repo — gitlink 방지)
+my-auto-trading/
 
 # OS
 .DS_Store
