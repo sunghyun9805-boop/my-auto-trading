@@ -80,9 +80,9 @@ class AccountSummary:
 
     @property
     def return_rate(self) -> float | None:
-        if self.total_purchase <= 0:
+        if self.total_eval <= 0:
             return None
-        return self.total_pl / self.total_purchase * 100.0
+        return self.total_pl / self.total_eval * 100.0
 
 
 @dataclass
