@@ -31,6 +31,9 @@ from config import load_config
 # ── 튜닝 파라미터 ────────────────────────────────────────────────
 RATE_LIMIT_SLEEP = 0.5
 SETTLEMENT_WAIT = 3
+# 주문 1건당 최대 시도 횟수 및 N회차 실패 후 대기시간(지수 백오프)
+MAX_ORDER_ATTEMPTS = 3
+ORDER_RETRY_BACKOFFS = (2.0, 4.0, 8.0)
 STOP_LOSS_PCT = -8.0
 STOP_LOSS_RATIO = 0.08
 MA_WINDOW = 20
@@ -115,6 +118,7 @@ class OrderResult:
     order_no: str = ""
     order_time: str = ""
     error: str = ""
+    attempts: int = 1
 
 
 @dataclass
@@ -487,46 +491,65 @@ def print_post_liquidation_panel(summary: AccountSummary | None) -> None:
 
 
 # ── 시장가 매수/매도 헬퍼 ────────────────────────────────────────
-def _market_sell(api: Api, ticker: str, name: str, qty: int) -> OrderResult:
-    result = OrderResult(side="SELL", ticker=ticker, name=name, qty=qty)
-    try:
-        resp = api.sell_kr_stock(ticker, qty, 0)
-        result.order_no = str(resp.get("ODNO", "")).strip()
-        result.order_time = str(resp.get("ORD_TMD", "")).strip()
-        if result.order_no:
-            result.accepted = True
-            print(
-                f"      → 매도 접수 OK 주문번호 {result.order_no}"
-                f" (주문시각 {result.order_time}, {qty}주 시장가)"
-            )
-        else:
+def _place_with_retry(
+    api: Api, side: Side, ticker: str, name: str, qty: int
+) -> OrderResult:
+    """시장가 주문 1건 — 예외/HTTP500 발생 시 지수 백오프(2/4/8s)로 최대 3회 시도.
+
+    - 성공(ODNO 수신): accepted=True 로 반환
+    - 응답은 왔지만 ODNO 없음(KIS 거부): 재시도 없이 accepted=False 로 반환
+    - 모든 시도 예외: accepted=False, qty 보존 → 호출측이 미체결 장부로 롤오버
+    """
+    result = OrderResult(side=side, ticker=ticker, name=name, qty=qty)
+    verb = "매수" if side == "BUY" else "매도"
+    fn = api.buy_kr_stock if side == "BUY" else api.sell_kr_stock
+    last_exc: Exception | None = None
+
+    for attempt in range(1, MAX_ORDER_ATTEMPTS + 1):
+        try:
+            resp = fn(ticker, qty, 0)
+            order_no = str(resp.get("ODNO", "")).strip()
+            if order_no:
+                result.order_no = order_no
+                result.order_time = str(resp.get("ORD_TMD", "")).strip()
+                result.accepted = True
+                result.attempts = attempt
+                print(
+                    f"      → {verb} 접수 OK 주문번호 {result.order_no}"
+                    f" (주문시각 {result.order_time}, {qty}주 시장가,"
+                    f" 시도 {attempt}/{MAX_ORDER_ATTEMPTS})"
+                )
+                return result
+            # 응답은 정상 수신 but ODNO 없음 = KIS 의 deterministic 거부 → 재시도 무의미
             result.error = f"응답에 ODNO 없음: {resp}"
-            print(f"      → 매도 접수 실패: {result.error}")
-    except Exception as exc:
-        result.error = str(exc)
-        print(f"      → 매도 접수 실패: {exc}")
+            result.attempts = attempt
+            print(f"      → {verb} 접수 거부(재시도 없음): {result.error}")
+            return result
+        except Exception as exc:
+            last_exc = exc
+            backoff = ORDER_RETRY_BACKOFFS[attempt - 1]
+            tag = "최종 실패 쿨다운" if attempt == MAX_ORDER_ATTEMPTS else "재시도 전 대기"
+            print(
+                f"      ↻ {verb} 예외 ({attempt}/{MAX_ORDER_ATTEMPTS}회차)"
+                f" {tag} {backoff}s: {exc}"
+            )
+            time.sleep(backoff)
+
+    result.accepted = False
+    result.attempts = MAX_ORDER_ATTEMPTS
+    result.error = f"{MAX_ORDER_ATTEMPTS}회 재시도 모두 실패: {last_exc}"
+    print(
+        f"      → {verb} 최종 실패 — {qty}주 미체결 보존(다음 봇 실행 시 롤오버)"
+    )
     return result
+
+
+def _market_sell(api: Api, ticker: str, name: str, qty: int) -> OrderResult:
+    return _place_with_retry(api, "SELL", ticker, name, qty)
 
 
 def _market_buy(api: Api, ticker: str, name: str, qty: int) -> OrderResult:
-    result = OrderResult(side="BUY", ticker=ticker, name=name, qty=qty)
-    try:
-        resp = api.buy_kr_stock(ticker, qty, 0)
-        result.order_no = str(resp.get("ODNO", "")).strip()
-        result.order_time = str(resp.get("ORD_TMD", "")).strip()
-        if result.order_no:
-            result.accepted = True
-            print(
-                f"      → 매수 접수 OK 주문번호 {result.order_no}"
-                f" (주문시각 {result.order_time}, {qty}주 시장가)"
-            )
-        else:
-            result.error = f"응답에 ODNO 없음: {resp}"
-            print(f"      → 매수 접수 실패: {result.error}")
-    except Exception as exc:
-        result.error = str(exc)
-        print(f"      → 매수 접수 실패: {exc}")
-    return result
+    return _place_with_retry(api, "BUY", ticker, name, qty)
 
 
 def place_orders(api: Api, targets: Iterable[OrderTarget]) -> list[OrderResult]:
@@ -536,7 +559,8 @@ def place_orders(api: Api, targets: Iterable[OrderTarget]) -> list[OrderResult]:
     for i, t in enumerate(target_list, 1):
         verb = "매수" if t.side == "BUY" else "매도"
         print(f"  [{i}/{len(target_list)}] {verb} 시도: {t.ticker} {t.name} — {t.qty}주")
-        time.sleep(RATE_LIMIT_SLEEP)
+        # KIS 초당 거래건수 초과(HTTP 500) 방지 — 주문 간 최소 1초 간격 보장
+        time.sleep(1.0)
         if t.qty <= 0:
             results.append(OrderResult(
                 side=t.side, ticker=t.ticker, name=t.name, qty=0,
@@ -579,12 +603,16 @@ def apply_fill_results_to_memo(
 
     - 접수 성공 + 완전 체결 → memo 에서 제거
     - 접수 성공 + 부분/미체결 → memo 에 잔여 수량 갱신
-    - 접수 실패 → memo 에 원래 수량 그대로 잔존(= 잔여 = 주문수량)
+    - 접수 실패(재시도 모두 실패 포함) → memo 에 원래 수량 그대로 잔존
+    - 수량 0 스킵 → 기존 memo 엔트리 보존(잘못 pop 하지 않음)
     """
     fully: list[FillResult] = []
     partially: list[FillResult] = []
     for f, o in zip(fills, orders):
         if not o.accepted:
+            # qty 0 스킵된 비주문 건은 미체결 기록 대상이 아니므로 memo 손대지 않음
+            if f.qty_ordered <= 0:
+                continue
             mark_unfilled(memo, f.side, f.ticker, f.name, f.qty_ordered)
             partially.append(f)
             continue
@@ -600,9 +628,15 @@ def apply_fill_results_to_memo(
 def log_fill_card(f: FillResult, o: OrderResult, idx: int) -> None:
     """단일 체결 결과를 모바일 세로형 카드 1개로 출력."""
     verb = "매수" if f.side == "BUY" else "매도"
+    retry_count = max(o.attempts - 1, 0)  # 1번 만에 성공 = 0회 재시도
     if not o.accepted:
-        status_emoji = "⚠️"
-        status_text = "접수실패"
+        # 3회 재시도 모두 실패한 경우는 결과 라인 자체를 강조 메시지로 교체
+        if o.attempts >= MAX_ORDER_ATTEMPTS:
+            status_emoji = "⚠️"
+            status_text = f"{MAX_ORDER_ATTEMPTS}회 재시도 최종 실패 (장부 이월)"
+        else:
+            status_emoji = "⚠️"
+            status_text = "접수실패"
     elif f.fully_filled:
         status_emoji = "🔴" if f.side == "BUY" else "🔵"
         status_text = f"체결완료({verb})"
@@ -622,5 +656,8 @@ def log_fill_card(f: FillResult, o: OrderResult, idx: int) -> None:
     print(f"  • 체결수량: {f.filled_qty:,} 주")
     print(f"  • 미체결:   {f.unfilled_qty:,} 주")
     print(f"  • 결과:    {status_emoji} {status_text}")
+    # 재시도 끝에 접수 성공한 경우 — 결과 바로 아래 강조 라인 추가
+    if o.accepted and retry_count > 0:
+        print(f"  • 접수:    ✅ 접수완료 ({retry_count}회 재시도 끝에 성공)")
     if not o.accepted and o.error:
         print(f"  • 에러:    {o.error}")
