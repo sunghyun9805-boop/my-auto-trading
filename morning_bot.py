@@ -203,6 +203,7 @@ def main() -> None:
 
     with tee_capture() as buf:
         print()
+        time.sleep(3.0)  # KIS rate limit 윈도우 회복 후 계좌 요약 조회
         print_post_liquidation_panel(fetch_account_summary(api))
     report_chunks.append(buf.getvalue())
 

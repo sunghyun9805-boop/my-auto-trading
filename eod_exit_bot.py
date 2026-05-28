@@ -184,6 +184,7 @@ def main() -> None:
             print("ℹ️ 보유 종목 없음 — 청산 대상 없음")
             print(SEP_LINE)
             print()
+            time.sleep(3.0)  # KIS rate limit 윈도우 회복 후 계좌 요약 조회
             print_post_liquidation_panel(fetch_account_summary(api))
         eod_chunks.append(buf.getvalue())
         send_message("".join(eod_chunks), title=eod_title)
@@ -202,6 +203,7 @@ def main() -> None:
     if not exits:
         with tee_capture() as buf:
             print()
+            time.sleep(3.0)  # KIS rate limit 윈도우 회복 후 계좌 요약 조회
             print_post_liquidation_panel(fetch_account_summary(api))
         eod_chunks.append(buf.getvalue())
         send_message("".join(eod_chunks), title=eod_title)
@@ -232,6 +234,7 @@ def main() -> None:
         print()
         log_fill_report(fills, orders, fully, partially)
         print()
+        time.sleep(3.0)  # KIS rate limit 윈도우 회복 후 계좌 요약 조회
         print_post_liquidation_panel(fetch_account_summary(api))
     eod_chunks.append(buf.getvalue())
     send_message("".join(eod_chunks), title=eod_title)
