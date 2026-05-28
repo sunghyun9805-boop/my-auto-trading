@@ -70,7 +70,9 @@ INDEX_BARS_TRADING_DAYS = 20
 KOSPI200_INDEX_CODE = "2001"
 
 # ── 인프라 ────────────────────────────────────────────────────
-SCAN_SLEEP = RATE_LIMIT_SLEEP
+# 종목 스캔(조회)용 가벼운 sleep — 무거운 백오프 대신 짧은 인터벌로 rate limit 사전 회피.
+# 주문(place_orders)에는 영향 없음(shared_utils._place_with_retry 의 2/4/8s 백오프 그대로 유지).
+SCAN_SLEEP = 0.1
 NAVER_URL = "https://finance.naver.com/sise/entryJongmok.naver"
 NAVER_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -246,10 +248,8 @@ def scan_market(
     total = len(tickers)
     for i, (ticker, name) in enumerate(tickers, 1):
         try:
-            quote = call_with_retry(
-                api._get_kr_stock_current_price_info, ticker,
-                label=f"price {ticker}",
-            )
+            # 스캔은 백오프 재시도 없음 — 실패 종목은 except 에서 단순 스킵
+            quote = api._get_kr_stock_current_price_info(ticker)
             current = int(_to_float(quote.get("stck_prpr")))
             high_52w = int(_to_float(quote.get("d250_hgpr")))
             if current <= 0 or high_52w <= 0:
@@ -258,9 +258,8 @@ def scan_market(
 
             time.sleep(SCAN_SLEEP)
 
-            _, bars = call_with_retry(
-                fetch_chart, api, ticker, DAILY_BARS_TRADING_DAYS,
-                is_index=False, label=ticker,
+            _, bars = fetch_chart(
+                api, ticker, DAILY_BARS_TRADING_DAYS, is_index=False
             )
             if len(bars) <= RS_LOOKBACK:
                 continue
