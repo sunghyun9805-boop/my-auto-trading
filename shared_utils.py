@@ -45,6 +45,11 @@ ONE_R_RATIO = RISK_PER_TRADE_PCT / 100.0
 STRATEGY_NAME = "52주 신고가 전략"
 SEP_LINE = "━" * 32
 
+# 장중 실시간 손절봇 — 09:00 기동, 30초 주기로 잔고 폴링, 15:14 종료
+# (15:15 EOD봇과 시간창 겹침 방지. 잔여 5분 노출은 EOD봇의 손절 안전망이 커버)
+INTRADAY_POLL_INTERVAL = 30
+INTRADAY_END_HMS = "15:14:00"
+
 UNFILLED_MEMO_FILE = "unfilled_orders.json"
 _MEMO_PATH = Path(__file__).resolve().parent / UNFILLED_MEMO_FILE
 
@@ -169,6 +174,17 @@ def now_kst() -> datetime:
 
 def _now_kst_str() -> str:
     return now_kst().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def should_continue_intraday() -> bool:
+    """장중 손절봇 루프 지속 여부 — 현재 KST 가 INTRADAY_END_HMS 이전이면 True."""
+    parts = INTRADAY_END_HMS.split(":")
+    if len(parts) == 2:
+        parts.append("0")
+    h, m, s = (int(x) for x in parts)
+    now = now_kst()
+    end = now.replace(hour=h, minute=m, second=s, microsecond=0)
+    return now < end
 
 
 def wait_until_kst(target_hms: str) -> None:

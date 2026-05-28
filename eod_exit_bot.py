@@ -1,11 +1,17 @@
 """eod_exit_bot.py — 15:15 KST 1회 실행되는 종가 기준 청산 봇.
 
+역할 분리(2026-05 개편):
+    * 장중 실시간 손절은 intraday_stop_loss_bot.py 가 09:00~15:14 전담 (30초 폴링)
+    * 본 봇은 (A) 20MA 추세이탈 청산 + (B) 손절 안전망 역할
+      └ 안전망: 장중봇이 15:14에 종료된 직후 ~ 15:15 사이 새로 -8% 진입한 종목을
+        EOD 시점에 1회 더 스캔하여 청산 (다중 방어선)
+
 흐름:
     1. 보유 잔고 조회 → "장 마감 전 포트폴리오" 텔레그램 전송
     2. 보유 종목별 일봉 → 20MA 산출
     3. 청산 조건 평가
-        A: 수익률 ≤ STOP_LOSS_PCT  (손절)
-        B: 현재가 < 20MA            (추세이탈)
+        A: 수익률 ≤ STOP_LOSS_PCT  (손절 안전망 — 통상 장중봇이 먼저 처리)
+        B: 현재가 < 20MA            (추세이탈 — EOD 전담)
        하나라도 만족 → 청산 대상
     4. 시장가 매도 주문 (장중 시장가, 주문 간 RATE_LIMIT_SLEEP)
     5. SETTLEMENT_WAIT(3초) 대기 후 잔고 델타로 체결 검증
@@ -74,8 +80,9 @@ def decide_exits(api: Api, holdings: list[Holding]) -> list[ExitDecision]:
         ma20 = fetch_ma20(api, h.ticker)
         decision = ExitDecision(holding=h, ma20=ma20)
         if h.profit_rate <= STOP_LOSS_PCT:
+            # 안전망 — 통상 장중 손절봇이 이미 처리. 15:14~15:15 신규 진입분만 잡힘.
             decision.reasons.append(
-                f"손절(수익률 {h.profit_rate:+.2f}% ≤ {STOP_LOSS_PCT:+.2f}%)"
+                f"손절 안전망(수익률 {h.profit_rate:+.2f}% ≤ {STOP_LOSS_PCT:+.2f}%)"
             )
         if ma20 is None:
             print(
@@ -92,7 +99,7 @@ def decide_exits(api: Api, holdings: list[Holding]) -> list[ExitDecision]:
 
 def log_decisions(decisions: list[ExitDecision]) -> list[ExitDecision]:
     print(SEP_LINE)
-    print(f"🎯 {MA_WINDOW}MA 기준 종가 청산 판단")
+    print(f"🎯 종가 청산 판단 — {MA_WINDOW}MA 추세이탈 + 손절 안전망")
     print(SEP_LINE)
     exits: list[ExitDecision] = []
     for idx, d in enumerate(decisions, 1):
