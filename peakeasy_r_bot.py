@@ -73,6 +73,9 @@ KOSPI200_INDEX_CODE = "2001"
 # 종목 스캔(조회)용 가벼운 sleep — 무거운 백오프 대신 짧은 인터벌로 rate limit 사전 회피.
 # 주문(place_orders)에는 영향 없음(shared_utils._place_with_retry 의 2/4/8s 백오프 그대로 유지).
 SCAN_SLEEP = 0.1
+# 패자부활전(Sweep) — 1차 스캔에서 실패한 종목들을 다음 영업일로 넘기지 않고 즉시 재시도
+MAX_SWEEP_ROUNDS = 2     # 최대 패자부활 회차
+SWEEP_COOLDOWN = 4.0     # 각 부활전 직전 cooldown — KIS rate limit 윈도우 회복 시간(3~5s)
 NAVER_URL = "https://finance.naver.com/sise/entryJongmok.naver"
 NAVER_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -241,57 +244,107 @@ def compute_index_return(api: Api) -> float:
 
 
 # ── 종목 스캔 ─────────────────────────────────────────────────
+def _scan_one_ticker(
+    api: Api, ticker: str, name: str, index_ret_20d: float
+) -> ScanRow | None:
+    """단일 종목 스캔. 조건 미달은 None 반환, API 예외는 그대로 raise.
+
+    API 예외는 호출측(scan_market)이 잡아서 패자부활 큐로 보낸다.
+    """
+    quote = api._get_kr_stock_current_price_info(ticker)
+    current = int(_to_float(quote.get("stck_prpr")))
+    high_52w = int(_to_float(quote.get("d250_hgpr")))
+    if current <= 0 or high_52w <= 0:
+        return None
+
+    time.sleep(SCAN_SLEEP)
+
+    _, bars = fetch_chart(api, ticker, DAILY_BARS_TRADING_DAYS, is_index=False)
+    if len(bars) <= RS_LOOKBACK:
+        return None
+
+    today_bar = bars[-1]
+    prior_20 = bars[-(RS_LOOKBACK + 1):-1]
+    if len(prior_20) != RS_LOOKBACK:
+        return None
+
+    avg20_vol = sum(b.volume for b in prior_20) / RS_LOOKBACK
+    close_20d_ago = bars[-(RS_LOOKBACK + 1)].close
+    if close_20d_ago <= 0:
+        return None
+    ret_20d = today_bar.close / close_20d_ago - 1.0
+
+    return ScanRow(
+        ticker=ticker,
+        name=name,
+        current=current,
+        high_52w=high_52w,
+        pct_of_high=current / high_52w,
+        today_volume=today_bar.volume,
+        avg20_volume=avg20_vol,
+        vol_surge=(today_bar.volume / avg20_vol) if avg20_vol > 0 else 0.0,
+        ret_20d=ret_20d,
+        rs_score=ret_20d - index_ret_20d,
+    )
+
+
 def scan_market(
     api: Api, tickers: list[tuple[str, str]], index_ret_20d: float
 ) -> list[ScanRow]:
+    """1차 빠른 스캔 + 패자부활전(최대 MAX_SWEEP_ROUNDS회) 으로 누락을 제로화."""
     rows: list[ScanRow] = []
+    failed: list[tuple[str, str]] = []
     total = len(tickers)
+
+    # ── 1차 스캔: 빠르게 한 바퀴, 실패 종목은 retry 큐로 ──
     for i, (ticker, name) in enumerate(tickers, 1):
         try:
-            # 스캔은 백오프 재시도 없음 — 실패 종목은 except 에서 단순 스킵
-            quote = api._get_kr_stock_current_price_info(ticker)
-            current = int(_to_float(quote.get("stck_prpr")))
-            high_52w = int(_to_float(quote.get("d250_hgpr")))
-            if current <= 0 or high_52w <= 0:
-                time.sleep(SCAN_SLEEP)
-                continue
-
-            time.sleep(SCAN_SLEEP)
-
-            _, bars = fetch_chart(
-                api, ticker, DAILY_BARS_TRADING_DAYS, is_index=False
-            )
-            if len(bars) <= RS_LOOKBACK:
-                continue
-
-            today_bar = bars[-1]
-            prior_20 = bars[-(RS_LOOKBACK + 1):-1]
-            if len(prior_20) != RS_LOOKBACK:
-                continue
-
-            avg20_vol = sum(b.volume for b in prior_20) / RS_LOOKBACK
-            close_20d_ago = bars[-(RS_LOOKBACK + 1)].close
-            if close_20d_ago <= 0:
-                continue
-            ret_20d = today_bar.close / close_20d_ago - 1.0
-
-            rows.append(ScanRow(
-                ticker=ticker,
-                name=name,
-                current=current,
-                high_52w=high_52w,
-                pct_of_high=current / high_52w,
-                today_volume=today_bar.volume,
-                avg20_volume=avg20_vol,
-                vol_surge=(today_bar.volume / avg20_vol) if avg20_vol > 0 else 0.0,
-                ret_20d=ret_20d,
-                rs_score=ret_20d - index_ret_20d,
-            ))
+            row = _scan_one_ticker(api, ticker, name, index_ret_20d)
+            if row is not None:
+                rows.append(row)
         except Exception as exc:
-            print(f"  ! 조회 실패 {ticker} {name}: {exc}")
+            print(f"  ! 1차 조회 실패 {ticker} {name}: {exc} → 패자부활 큐")
+            failed.append((ticker, name))
         if i % 30 == 0:
-            print(f"      ... {i}/{total} 진행 (수집 {len(rows)})")
+            print(
+                f"      ... {i}/{total} 진행"
+                f" (수집 {len(rows)}, 실패 {len(failed)})"
+            )
         time.sleep(SCAN_SLEEP)
+
+    # ── 패자부활전: 실패 큐가 빌 때까지 최대 MAX_SWEEP_ROUNDS 회 ──
+    for sweep_round in range(1, MAX_SWEEP_ROUNDS + 1):
+        if not failed:
+            break
+        print(
+            f"  🔁 패자부활전 {sweep_round}/{MAX_SWEEP_ROUNDS} —"
+            f" {len(failed)}종목 재시도 (cooldown {SWEEP_COOLDOWN}s)"
+        )
+        time.sleep(SWEEP_COOLDOWN)
+        still_failed: list[tuple[str, str]] = []
+        for ticker, name in failed:
+            try:
+                row = _scan_one_ticker(api, ticker, name, index_ret_20d)
+                if row is not None:
+                    rows.append(row)
+            except Exception as exc:
+                print(f"    ! 부활 {sweep_round}차 실패 {ticker} {name}: {exc}")
+                still_failed.append((ticker, name))
+            time.sleep(SCAN_SLEEP)
+        recovered = len(failed) - len(still_failed)
+        print(
+            f"      → 부활 {sweep_round}차 결과: 복구 {recovered}종목,"
+            f" 잔여 실패 {len(still_failed)}종목"
+        )
+        failed = still_failed
+
+    if failed:
+        print(
+            f"  ⚠️ 패자부활전 후에도 누락 {len(failed)}종목 — 종목코드: "
+            f"{[t for t, _ in failed]}"
+        )
+    else:
+        print(f"  ✅ 누락 없음 — 전 종목 스캔 완료")
     return rows
 
 
