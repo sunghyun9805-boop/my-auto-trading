@@ -72,7 +72,8 @@ KOSPI200_INDEX_CODE = "2001"
 # ── 인프라 ────────────────────────────────────────────────────
 # 종목 스캔(조회)용 가벼운 sleep — 무거운 백오프 대신 짧은 인터벌로 rate limit 사전 회피.
 # 주문(place_orders)에는 영향 없음(shared_utils._place_with_retry 의 2/4/8s 백오프 그대로 유지).
-SCAN_SLEEP = 0.1
+# 0.1s → 0.3s: 모의투자 환경(초당 ~5건 한도)에서 1차 스캔 실패율이 47%까지 치솟아 상향.
+SCAN_SLEEP = 0.3
 # 패자부활전(Sweep) — 1차 스캔에서 실패한 종목들을 다음 영업일로 넘기지 않고 즉시 재시도
 MAX_SWEEP_ROUNDS = 2     # 최대 패자부활 회차
 SWEEP_COOLDOWN = 4.0     # 각 부활전 직전 cooldown — KIS rate limit 윈도우 회복 시간(3~5s)
