@@ -30,7 +30,9 @@ from config import load_config
 
 # ── 튜닝 파라미터 ────────────────────────────────────────────────
 RATE_LIMIT_SLEEP = 0.5
-SETTLEMENT_WAIT = 3
+# 주문 접수 후 KIS 잔고 시스템에 체결이 반영될 때까지의 대기 시간(초).
+# 너무 짧으면 정상 체결을 부분체결로 오인하는 사고가 발생함 → 5초가 안전선.
+SETTLEMENT_WAIT = 5
 # 주문 1건당 최대 시도 횟수 및 N회차 실패 후 대기시간(지수 백오프)
 MAX_ORDER_ATTEMPTS = 3
 ORDER_RETRY_BACKOFFS = (2.0, 4.0, 8.0)

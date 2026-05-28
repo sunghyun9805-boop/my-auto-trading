@@ -28,6 +28,7 @@ import time
 from shared_utils import (
     RATE_LIMIT_SLEEP,
     SEP_LINE,
+    SETTLEMENT_WAIT,
     STRATEGY_NAME,
     UNFILLED_MEMO_FILE,
     FillResult,
@@ -181,7 +182,9 @@ def main() -> None:
     # ── [5/5] 잔고 재조회 → 체결 검증 → 장부 갱신 ──────────────────
     print()
     print("[5/5] 잔고 재조회 → 체결 검증 → 장부 이월")
-    time.sleep(RATE_LIMIT_SLEEP)
+    # KIS 잔고 시스템에 체결이 반영될 시간 확보 — 너무 빨리 조회하면 부분체결로 오인
+    print(f"  ⏳ 체결 반영 대기 — {SETTLEMENT_WAIT}초")
+    time.sleep(SETTLEMENT_WAIT)
     qty_after = _query_qty_after(api)
     fills = build_fill_results(orders, qty_before, qty_after)
     fully, partially = apply_fill_results_to_memo(memo, fills, orders)
